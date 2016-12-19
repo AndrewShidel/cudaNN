@@ -15,6 +15,7 @@ struct Edge;
 struct Vertex;
 struct Layer;
 int random(int min, int max);
+float average(float average, float dataPoint);
 
 template<typename T>
 inline void removeFromVector(vector<T> & v, const T & item);
@@ -63,8 +64,8 @@ public:
     Edge* addEdge(Vertex* from, Vertex* to);
     void removeEdge(Edge* edge);
     int findLayer(Vertex* vertex);
-    void trainGPU(vector<float> inputs, vector<float> target);
-    void trainGPU(vector<float> inputs, vector<float> target, float learningRate, float momentum);
+    float trainGPU(vector<float> inputs, vector<float> target);
+    float trainGPU(vector<float> inputs, vector<float> target, float learningRate, float momentum);
     vector<float> runGPULauncher(vector<float>& inputs);
     vector<float> runCpu(vector<float>& inputs);
     vector<float> run(vector<float>& inputs);
@@ -94,40 +95,34 @@ int test(bool useGPU, int inputSize, vector<int> hidden, int outputSize) {
     nn.print(outputFile);
 
     clock_t begin = clock();
-    /*vector<float> output;
-    for (int i=0; i<5; ++i) {
-        output = nn.run(input);
-        cout << "Output: " << output[output.size()-1] << "\n";
-    }*/
 
-    vector<float> target(1);
+    vector<float> target(2);
     vector<float> input(1);
-    for (int i=0; i<10000; i++) {
-      float fInput = random(1000, 5000)/10000.0;
-      input[0] = fInput;
-      target[0] = fInput*2;
+    float error = 1.0;
+    do {
+      int iInput = random(0, 5000);
+      input[0] = iInput/5000.0;
+      target[0] = (iInput%2==0?1.0:0.0);
+      target[1] = (iInput%2==1?1.0:0.0);
       std::cout << "Expected: " << target[0] << ", Input: " << input[0] << ", ";
-      nn.trainGPU(input, target);
-    }
+      error = average(error, nn.trainGPU(input, target));
+      std::cout << "\rError: " << error;
+    } while(error > 0);
 
     clock_t end = clock();
     double elapsed_secs = double(end - begin) / CLOCKS_PER_SEC;
     cout << "Time ms: " << elapsed_secs*1000 << "\n";
-    //cout << "Output: " << output[output.size()-1] << "\n";
-    /*for (int i=0; i<output.size(); ++i) {
-        cout << "Output[" << i << "]: " << output[i] << "\n";
-    }*/
     return 0;
 }
 
 int main(int argc, char** argv) {
     vector<int> hiddenSizes;
-    hiddenSizes.push_back(20);
-    hiddenSizes.push_back(100);
-    hiddenSizes.push_back(20);
+    hiddenSizes.push_back(50);
+    hiddenSizes.push_back(200);
+    hiddenSizes.push_back(50);
 
     for (int i=0; i<1; i++) {
-      test(true, 1, hiddenSizes, 1);
+      test(true, 1, hiddenSizes, 2);
     }
     cout << "--------------------------\n";
     /*for (int i=0; i<1; i++) {
@@ -158,17 +153,6 @@ NN::NN(bool useGPU, int input, vector<int> hidden, int output) {
             nodes++;
         }
     }
-    /*int layer = 1;
-    int nodesInPrevLayers = nodes;
-    for (int i=0; i<hidden; ++i) {
-        addVertex(random(1, nodesInPrevLayers), 0, false, false, layer, false);
-        nodes++;
-        if (random(0,100)/100.0 > layerDist(((double)nodes)/nodeCount, 1)) {
-            layer++;
-            nodesInPrevLayers = nodes;
-        }
-    }*/
-
 
     for (int i=0; i<output; ++i) {
         addVertex(random(1, nodes), 0, false, true, 2, false);
@@ -223,14 +207,9 @@ void NN::updateDeviceMemory() {
     cudaMalloc(&d_changes, floatEdge);
     cudaMalloc(&d_target, sizeof(float)*outputSize);
 
-
     cudaMemset(d_outputs, 0, floatNode);
+    cudaMemset(d_changes, 0, floatEdge);
 
-    // TODO: Copy from host to device
-    // Copy each edge into int* then copy to device.
-    // Move edgeNodeCount from layer to NN.
-    // Copy edgeNodeCount into device
-    // Need to reset nodeRunCount?
     float* weights = (float*) malloc(floatEdge);
     float* bias = (float*) malloc(floatNode);
     int* nodeRunCount = (int*) malloc(intNode);
@@ -284,10 +263,6 @@ vector<float> NN::run(vector<float>& inputs) {
     }
 }
 
-// weights: weights for each edge
-// edgeNodeMapping: index is an edge, value is a node index
-// nodeRunCount: Starts at the number of inputs not node.
-// outputs: output of each node
 __global__ void runGPU(float* weights, int* edgeNodeMappingTo, int* edgeNodeMappingFrom, int* nodeRunCount, int* initialNodeRunCount, float* outputs, float* bias, int offset, int n) {
     int id = blockIdx.x*blockDim.x+threadIdx.x + offset;
     if (id < n) {
@@ -368,34 +343,44 @@ __global__ void learnGPU(float learningRate,
         } \
     } while (0)
 
-void NN::trainGPU(vector<float> inputs, vector<float> target) {
-    trainGPU(inputs, target, 0.3, 0.1);
+float NN::trainGPU(vector<float> inputs, vector<float> target) {
+    return trainGPU(inputs, target, 0.3, 0.1);
 }
 
-void NN::trainGPU(vector<float> inputs, vector<float> target, float learningRate, float momentum) {
+float NN::trainGPU(vector<float> inputs, vector<float> target, float learningRate, float momentum) {
     vector<float> results = runGPULauncher(inputs);
     std::cout << "Output: " << results[results.size()-1] << "\n";
+
     int nodeSize = nodes.size();
     int outputSize = target.size();
     float errors[nodeSize];
     float deltas[nodeSize];
+
     memset(errors, 0, sizeof errors);
     memset(deltas, 0, sizeof deltas);
+
+    float errorSum = 0;
     for (int i=1; i<=outputSize; ++i) {
         float output = results[results.size()-i];
         errors[nodeSize-i] = target[outputSize-i] - output;
         deltas[nodeSize-i] = errors[nodeSize-i] * output * (1-output);
+        errorSum += errors[nodeSize-i];
     }
+    float error = abs(errorSum/outputSize);
+    //std::cout << "Error: " << error << "\n";
+
     cudaMemcpy(d_errors, &errors[0], nodeSize*sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_deltas, &deltas[0], nodeSize*sizeof(float), cudaMemcpyHostToDevice);
 
+
     int blockSize = 512;
     int gridSize = edges.size()/blockSize + 1;
+
     int offset = edges.size();
 
     float* d_buffer;
     //cudaMalloc(&d_buffer, offset*sizeof(float));
-    cudaMemset(d_changes, 0, offset*sizeof(float));
+
 
     for (int i=layers.size()-1; i>0; --i) {
         int N = layers[i].edges.size();
@@ -424,6 +409,7 @@ void NN::trainGPU(vector<float> inputs, vector<float> target, float learningRate
     for (int i=0; i<edges.size(); ++i) {
         std::cout << "buffer["<<i<<"] = " << buffer[i] << "\n";
     }*/
+    return error;
 }
 vector<float> NN::runGPULauncher(vector<float>& inputs) {
     clock_t begin = clock();
@@ -639,4 +625,11 @@ int NN::findLayer(Vertex* vertex) {
 
 int random(int min, int max) {
     return rand()%(max-min + 1) + min;
+}
+
+float average(float average, float dataPoint) {
+    static int N = 20;
+    average -= average / N;
+    average += dataPoint / N;
+    return average;
 }
