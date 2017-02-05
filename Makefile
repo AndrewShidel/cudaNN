@@ -1,6 +1,11 @@
 build:
-	if ! cmp -s "nn.cu" ".nn_sav" ; then nvcc -o nn nn.cu ; fi
-	cp nn.cu .nn_sav
+	@nvcc -o nn nn.cu
 
-run:build
+buildIfChanged:
+	@find . -name '*.cu' -o -name '*.h' -o -name '*.cpp' -type f | xargs cat | md5 > /tmp/._checksums
+	@if ! cmp -s "/tmp/._checksums" "/tmp/.checksums" ; then make build ; fi
+	@rm -f /tmp/.checksums
+	@mv /tmp/._checksums /tmp/.checksums
+
+run:buildIfChanged
 	./nn
